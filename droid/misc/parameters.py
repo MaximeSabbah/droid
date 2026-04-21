@@ -1,18 +1,30 @@
 import os
 from cv2 import aruco
 
+
+def _env_or_default(name, default):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value
+
+
 # Robot Params #
-nuc_ip = ""
-robot_ip = ""
-laptop_ip = ""
-sudo_password = ""
-robot_type = ""  # 'panda' or 'fr3'
-robot_serial_number = ""
+# Custom same-PC OpenPI deployment defaults.
+# None selects RobotEnv's local FrankaRobot path. Set DROID_NUC_IP to use
+# the legacy server-backed path as a fallback.
+nuc_ip = _env_or_default("DROID_NUC_IP", None)
+robot_ip = _env_or_default("DROID_ROBOT_IP", "SET_DROID_ROBOT_IP")
+laptop_ip = _env_or_default("DROID_LAPTOP_IP", "127.0.0.1")
+sudo_password = _env_or_default("DROID_SUDO_PASSWORD", "")
+robot_type = _env_or_default("DROID_ROBOT_TYPE", "panda")  # 'panda' or 'fr3'
+robot_serial_number = _env_or_default("DROID_ROBOT_SERIAL_NUMBER", "SET_ROBOT_SERIAL_NUMBER")
 
 # Camera ID's #
-hand_camera_id = ""
-varied_camera_1_id = ""
-varied_camera_2_id = ""
+# Semantic IDs used by the OpenPI DROID inference path.
+hand_camera_id = _env_or_default("DROID_HAND_CAMERA_ID", "d435_color")
+varied_camera_1_id = _env_or_default("DROID_VARIED_CAMERA_1_ID", "arducam_left")
+varied_camera_2_id = _env_or_default("DROID_VARIED_CAMERA_2_ID", "arducam_right")
 
 # Charuco Board Params #
 CHARUCOBOARD_ROWCOUNT = 9
@@ -26,4 +38,3 @@ ubuntu_pro_token = ""
 
 # Code Version [DONT CHANGE] #
 droid_version = "1.3"
-

@@ -2,24 +2,80 @@ import os
 import random
 from collections import defaultdict
 
-from droid.camera_utils.camera_readers.zed_camera import gather_zed_cameras
 from droid.camera_utils.info import get_camera_type
+from droid.misc.parameters import hand_camera_id, varied_camera_1_id, varied_camera_2_id
 
 
 class MultiCameraWrapper:
-    def __init__(self, camera_kwargs={}):
+    custom_camera_ids = {"arducam_left", "arducam_right", "d435_color"}
+
+    def __init__(self, camera_kwargs=None):
+        camera_kwargs = dict(camera_kwargs or {})
+        camera_backend = camera_kwargs.pop("camera_backend", os.environ.get("DROID_CAMERA_BACKEND", "auto"))
+        camera_backend = (camera_backend or "auto").lower()
+        requested_camera_ids = camera_kwargs.pop(
+            "camera_ids", [hand_camera_id, varied_camera_1_id, varied_camera_2_id]
+        )
+        if isinstance(requested_camera_ids, str):
+            requested_camera_ids = [requested_camera_ids]
+        requested_camera_ids = [cam_id for cam_id in requested_camera_ids if cam_id]
+
         # Open Cameras #
-        zed_cameras = gather_zed_cameras()
-        self.camera_dict = {cam.serial_number: cam for cam in zed_cameras}
+        cameras = self._gather_cameras(camera_backend, requested_camera_ids)
+        self.camera_dict = {cam.serial_number: cam for cam in cameras}
 
         # Set Correct Parameters #
         for cam_id in self.camera_dict.keys():
-            cam_type = get_camera_type(cam_id)
-            curr_cam_kwargs = camera_kwargs.get(cam_type, {})
+            curr_cam_kwargs = self._get_camera_kwargs(cam_id, camera_kwargs)
             self.camera_dict[cam_id].set_reading_parameters(**curr_cam_kwargs)
 
         # Launch Camera #
         self.set_trajectory_mode()
+
+    def _gather_cameras(self, camera_backend, requested_camera_ids):
+        if camera_backend == "auto":
+            use_custom = any(cam_id in self.custom_camera_ids for cam_id in requested_camera_ids)
+            camera_backend = "openpi" if use_custom else "zed"
+
+        if camera_backend == "zed":
+            return self._gather_zed_cameras()
+        if camera_backend in ("openpi", "custom", "opencv_realsense"):
+            from droid.camera_utils.camera_readers.arducam_camera import gather_arducam_cameras
+            from droid.camera_utils.camera_readers.realsense_camera import gather_realsense_cameras
+
+            cameras = []
+            cameras.extend(gather_arducam_cameras(requested_camera_ids))
+            cameras.extend(gather_realsense_cameras(requested_camera_ids))
+            if not cameras:
+                raise RuntimeError(
+                    "No OpenPI cameras configured. Expected one or more of: {0}".format(
+                        sorted(self.custom_camera_ids)
+                    )
+                )
+            return cameras
+
+        raise ValueError("Unsupported DROID camera backend: {0}".format(camera_backend))
+
+    def _gather_zed_cameras(self):
+        try:
+            from droid.camera_utils.camera_readers.zed_camera import gather_zed_cameras
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to import the ZED camera reader. Set DROID_CAMERA_BACKEND=openpi "
+                "for Arducam/D435 deployment, or install the ZED SDK for the upstream path."
+            ) from exc
+        return gather_zed_cameras()
+
+    def _get_camera_kwargs(self, cam_id, camera_kwargs):
+        curr_cam_kwargs = {}
+        default_kwargs = camera_kwargs.get("default", {})
+        cam_type = get_camera_type(cam_id)
+        type_kwargs = camera_kwargs.get(cam_type, {}) if cam_type is not None else {}
+        id_kwargs = camera_kwargs.get(cam_id, {})
+        curr_cam_kwargs.update(default_kwargs)
+        curr_cam_kwargs.update(type_kwargs)
+        curr_cam_kwargs.update(id_kwargs)
+        return curr_cam_kwargs
 
     ### Calibration Functions ###
     def get_camera(self, camera_id):
