@@ -5,13 +5,19 @@ CONDA_HOOK="${DROID_CONDA_HOOK:-$HOME/anaconda3/etc/profile.d/conda.sh}"
 CONDA_ENV="${DROID_POLYMETIS_CONDA_ENV:-polymetis-local}"
 
 if [[ -n "${DROID_ENV_ACTIVATE:-}" ]]; then
+    set +u
     eval "$DROID_ENV_ACTIVATE"
+    set -u
 elif [[ -f "$CONDA_HOOK" ]]; then
     source "$CONDA_HOOK"
+    set +u
     conda activate "$CONDA_ENV"
+    set -u
 elif command -v micromamba >/dev/null 2>&1; then
     eval "$(micromamba shell hook --shell bash)"
+    set +u
     micromamba activate "$CONDA_ENV"
+    set -u
 else
     echo "Could not activate $CONDA_ENV. Set DROID_ENV_ACTIVATE or DROID_CONDA_HOOK." >&2
     exit 1
