@@ -7,8 +7,6 @@ import time
 import numpy as np
 from PIL import Image
 
-from droid.robot_env import RobotEnv
-
 
 DROID_CONTROL_FREQUENCY = 15
 EXPECTED_ACTION_CHUNK_SHAPE = (10, 8)
@@ -45,8 +43,11 @@ def parse_args():
     parser.add_argument("--camera_width", type=int, default=0)
     parser.add_argument("--camera_height", type=int, default=0)
     parser.add_argument("--camera_fps", type=int, default=30)
+    parser.add_argument("--mock_cameras", action="store_true")
     parser.add_argument("--remote_host", default=os.environ.get("OPENPI_HOST", "127.0.0.1"))
     parser.add_argument("--remote_port", type=int, default=int(os.environ.get("OPENPI_PORT", "8000")))
+    parser.add_argument("--mock_policy", action="store_true")
+    parser.add_argument("--mock_policy_bad_shape", action="store_true")
     parser.add_argument("--prompt", default=os.environ.get("OPENPI_PROMPT"))
     parser.add_argument("--max_timesteps", type=int, default=1)
     parser.add_argument("--open_loop_horizon", type=int, default=8)
@@ -64,10 +65,12 @@ def main():
     args = parse_args()
     if not args.dry_run and args.mock_robot_state:
         raise ValueError("--mock_robot_state cannot be used with --execute")
+    if not args.dry_run and (args.mock_policy or args.mock_policy_bad_shape or args.mock_cameras):
+        raise ValueError("Mock policy/camera options are dry-run only")
     if not args.dry_run:
         require_motion_guards()
 
-    policy_client = make_policy_client(args.remote_host, args.remote_port)
+    policy_client = make_policy_client(args)
     observation_source = make_observation_source(args)
     instruction = args.prompt or input("Enter instruction: ")
 
@@ -83,6 +86,7 @@ def main():
             if actions_from_chunk_completed == 0 or actions_from_chunk_completed >= args.open_loop_horizon:
                 actions_from_chunk_completed = 0
                 request_data = make_policy_request(curr_obs, args.external_camera, instruction)
+                validate_policy_request(request_data)
                 with prevent_keyboard_interrupt():
                     pred_action_chunk = np.asarray(policy_client.infer(request_data)["actions"])
                 validate_action_chunk(pred_action_chunk)
@@ -117,14 +121,30 @@ def require_motion_guards():
         )
 
 
-def make_policy_client(remote_host, remote_port):
+def make_policy_client(args):
+    if args.mock_policy or args.mock_policy_bad_shape:
+        return MockPolicyClient(bad_shape=args.mock_policy_bad_shape)
+
     try:
         from openpi_client import websocket_client_policy
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "openpi-client is required. Install /workspace/openpi/packages/openpi-client in the DROID env."
         ) from exc
-    return websocket_client_policy.WebsocketClientPolicy(remote_host, remote_port)
+    return websocket_client_policy.WebsocketClientPolicy(args.remote_host, args.remote_port)
+
+
+class MockPolicyClient:
+    def __init__(self, bad_shape=False):
+        self.bad_shape = bad_shape
+
+    def infer(self, request_data):
+        shape = (9, 8) if self.bad_shape else EXPECTED_ACTION_CHUNK_SHAPE
+        actions = np.zeros(shape, dtype=np.float32)
+        if not self.bad_shape:
+            actions[:, :7] = np.linspace(-0.15, 0.15, shape[0], dtype=np.float32)[:, None]
+            actions[:, 7] = np.linspace(0.0, 1.0, shape[0], dtype=np.float32)
+        return {"actions": actions}
 
 
 def make_policy_request(curr_obs, external_camera, instruction):
@@ -146,10 +166,43 @@ def make_policy_request(curr_obs, external_camera, instruction):
     }
 
 
+def validate_policy_request(request_data):
+    required_keys = {
+        "observation/exterior_image_1_left",
+        "observation/wrist_image_left",
+        "observation/joint_position",
+        "observation/gripper_position",
+        "prompt",
+    }
+    missing_keys = sorted(required_keys.difference(request_data))
+    if missing_keys:
+        raise ValueError("Policy request is missing keys: {0}".format(missing_keys))
+
+    for image_key in ("observation/exterior_image_1_left", "observation/wrist_image_left"):
+        image = np.asarray(request_data[image_key])
+        if image.shape != (224, 224, 3):
+            raise ValueError("{0} must have shape (224, 224, 3), got {1}".format(image_key, image.shape))
+
+    joint_position = np.asarray(request_data["observation/joint_position"])
+    if joint_position.shape != (7,):
+        raise ValueError("observation/joint_position must have shape (7,), got {0}".format(joint_position.shape))
+
+    gripper_position = np.asarray(request_data["observation/gripper_position"])
+    if gripper_position.shape != (1,):
+        raise ValueError(
+            "observation/gripper_position must have shape (1,), got {0}".format(gripper_position.shape)
+        )
+
+    if not isinstance(request_data["prompt"], str) or not request_data["prompt"]:
+        raise ValueError("prompt must be a non-empty string")
+
+
 def make_observation_source(args):
     camera_kwargs = build_camera_kwargs(args)
     if args.mock_robot_state:
         return CameraOnlyObservationSource(camera_kwargs)
+
+    from droid.robot_env import RobotEnv
 
     env = RobotEnv(
         action_space="joint_velocity",
@@ -162,6 +215,7 @@ def make_observation_source(args):
 
 
 def build_camera_kwargs(args):
+    camera_backend = "mock" if args.mock_cameras else args.camera_backend
     resolution = (args.camera_width, args.camera_height) if args.camera_width and args.camera_height else (0, 0)
     default_kwargs = {
         "image": True,
@@ -173,7 +227,7 @@ def build_camera_kwargs(args):
         "fps": args.camera_fps,
     }
     camera_kwargs = {
-        "camera_backend": args.camera_backend,
+        "camera_backend": camera_backend,
         "camera_ids": [args.left_camera_id, args.right_camera_id, args.wrist_camera_id],
         "default": default_kwargs,
     }

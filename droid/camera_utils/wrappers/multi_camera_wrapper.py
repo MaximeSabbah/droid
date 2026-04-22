@@ -39,6 +39,10 @@ class MultiCameraWrapper:
 
         if camera_backend == "zed":
             return self._gather_zed_cameras()
+        if camera_backend in ("mock", "fake", "synthetic"):
+            from droid.camera_utils.camera_readers.mock_camera import gather_mock_cameras
+
+            return gather_mock_cameras(requested_camera_ids)
         if camera_backend in ("openpi", "custom", "opencv_realsense"):
             from droid.camera_utils.camera_readers.arducam_camera import gather_arducam_cameras
             from droid.camera_utils.camera_readers.realsense_camera import gather_realsense_cameras
