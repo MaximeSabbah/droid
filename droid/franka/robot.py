@@ -23,14 +23,17 @@ class FrankaRobot:
             pass
 
         dir_path = os.path.dirname(os.path.realpath(__file__))
-        self._robot_process = run_terminal_command(
-            "echo " + sudo_password + " | sudo -S " + "bash " + dir_path + "/launch_robot.sh"
-        )
-        self._gripper_process = run_terminal_command(
-            "echo " + sudo_password + " | sudo -S " + "bash " + dir_path + "/launch_gripper.sh"
-        )
+        self._robot_process = run_terminal_command(self._build_launch_command(dir_path, "launch_robot.sh"))
+        self._gripper_process = run_terminal_command(self._build_launch_command(dir_path, "launch_gripper.sh"))
         self._server_launched = True
         time.sleep(5)
+
+    def _build_launch_command(self, dir_path, script_name):
+        script_path = os.path.join(dir_path, script_name)
+        launch_with_sudo = os.environ.get("DROID_LAUNCH_WITH_SUDO", "1") == "1"
+        if launch_with_sudo:
+            return "echo " + sudo_password + " | sudo -S " + "bash " + script_path
+        return "bash " + script_path
 
     def launch_robot(self):
         self._robot = RobotInterface(ip_address="localhost")

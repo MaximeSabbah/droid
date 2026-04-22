@@ -13,7 +13,15 @@ from droid.misc.transformations import change_pose_frame
 
 
 class RobotEnv(gym.Env):
-    def __init__(self, action_space="cartesian_velocity", gripper_action_space=None, camera_kwargs={}, do_reset=True):
+    def __init__(
+        self,
+        action_space="cartesian_velocity",
+        gripper_action_space=None,
+        camera_kwargs=None,
+        do_reset=True,
+        robot_backend=None,
+        launch_robot=True,
+    ):
         # Initialize Gym Environment
         super().__init__()
 
@@ -30,21 +38,41 @@ class RobotEnv(gym.Env):
         self.DoF = 7 if ("cartesian" in action_space) else 8
         self.control_hz = 15
 
-        if nuc_ip is None:
-            from franka.robot import FrankaRobot
+        self.robot_backend = self._resolve_robot_backend(robot_backend)
+        if self.robot_backend == "local":
+            from droid.franka.robot import FrankaRobot
 
             self._robot = FrankaRobot()
+            if launch_robot:
+                self._robot.launch_controller()
+                self._robot.launch_robot()
+        elif self.robot_backend == "server":
+            if nuc_ip is None:
+                raise ValueError("RobotEnv robot_backend='server' requires DROID_NUC_IP to be set")
+            self._robot = ServerInterface(ip_address=nuc_ip, launch=launch_robot)
         else:
-            self._robot = ServerInterface(ip_address=nuc_ip)
+            raise ValueError("Unsupported RobotEnv robot_backend: {0}".format(self.robot_backend))
 
         # Create Cameras
-        self.camera_reader = MultiCameraWrapper(camera_kwargs)
+        self.camera_reader = MultiCameraWrapper(camera_kwargs or {})
         self.calibration_dict = load_calibration_info()
         self.camera_type_dict = camera_type_dict
 
         # Reset Robot
         if do_reset:
             self.reset()
+
+    def _resolve_robot_backend(self, robot_backend):
+        if robot_backend is None:
+            import os
+
+            robot_backend = os.environ.get("DROID_ROBOT_BACKEND")
+        if robot_backend is None or robot_backend == "auto":
+            return "local" if nuc_ip is None else "server"
+        robot_backend = robot_backend.lower()
+        if robot_backend not in ["local", "server"]:
+            raise ValueError("DROID_ROBOT_BACKEND must be one of: auto, local, server")
+        return robot_backend
 
     def step(self, action):
         # Check Action
