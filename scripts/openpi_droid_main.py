@@ -9,7 +9,7 @@ from PIL import Image
 
 
 DROID_CONTROL_FREQUENCY = 15
-EXPECTED_ACTION_CHUNK_SHAPE = (10, 8)
+EXPECTED_ACTION_DIM = 8
 
 
 @contextlib.contextmanager
@@ -33,7 +33,7 @@ def prevent_keyboard_interrupt():
 def parse_args():
     parser = argparse.ArgumentParser(description="Run OpenPI DROID inference with Arducam + D435 cameras.")
     parser.add_argument("--left_camera_id", default=os.environ.get("DROID_VARIED_CAMERA_1_ID", "arducam_left"))
-    parser.add_argument("--right_camera_id", default=os.environ.get("DROID_VARIED_CAMERA_2_ID", "arducam_right"))
+    parser.add_argument("--right_camera_id", default=os.environ.get("DROID_VARIED_CAMERA_2_ID", ""))
     parser.add_argument("--wrist_camera_id", default=os.environ.get("DROID_HAND_CAMERA_ID", "d435_color"))
     parser.add_argument("--external_camera", choices=["left", "right"], default="left")
     parser.add_argument("--camera_backend", default=os.environ.get("DROID_CAMERA_BACKEND", "openpi"))
@@ -67,6 +67,8 @@ def main():
         raise ValueError("--mock_robot_state cannot be used with --execute")
     if not args.dry_run and (args.mock_policy or args.mock_policy_bad_shape or args.mock_cameras):
         raise ValueError("Mock policy/camera options are dry-run only")
+    if args.external_camera == "right" and not args.right_camera_id:
+        raise ValueError("--external_camera=right requires --right_camera_id")
     if not args.dry_run:
         require_motion_guards()
 
@@ -83,7 +85,11 @@ def main():
             obs_dict = observation_source.get_observation()
             curr_obs = extract_observation(args, obs_dict, save_to_disk=(t_step == 0))
 
-            if actions_from_chunk_completed == 0 or actions_from_chunk_completed >= args.open_loop_horizon:
+            if (
+                pred_action_chunk is None
+                or actions_from_chunk_completed >= args.open_loop_horizon
+                or actions_from_chunk_completed >= pred_action_chunk.shape[0]
+            ):
                 actions_from_chunk_completed = 0
                 request_data = make_policy_request(curr_obs, args.external_camera, instruction)
                 validate_policy_request(request_data)
@@ -139,7 +145,7 @@ class MockPolicyClient:
         self.bad_shape = bad_shape
 
     def infer(self, request_data):
-        shape = (9, 8) if self.bad_shape else EXPECTED_ACTION_CHUNK_SHAPE
+        shape = (10, 7) if self.bad_shape else (10, EXPECTED_ACTION_DIM)
         actions = np.zeros(shape, dtype=np.float32)
         if not self.bad_shape:
             actions[:, :7] = np.linspace(-0.15, 0.15, shape[0], dtype=np.float32)[:, None]
@@ -155,9 +161,13 @@ def make_policy_request(curr_obs, external_camera, instruction):
             "openpi-client is required. Install /workspace/openpi/packages/openpi-client in the DROID env."
         ) from exc
 
+    external_image_key = "{0}_image".format(external_camera)
+    if curr_obs.get(external_image_key) is None:
+        raise ValueError("Requested external camera {0!r}, but no image is available".format(external_camera))
+
     return {
         "observation/exterior_image_1_left": image_tools.resize_with_pad(
-            curr_obs["{0}_image".format(external_camera)], 224, 224
+            curr_obs[external_image_key], 224, 224
         ),
         "observation/wrist_image_left": image_tools.resize_with_pad(curr_obs["wrist_image"], 224, 224),
         "observation/joint_position": curr_obs["joint_position"],
@@ -226,9 +236,12 @@ def build_camera_kwargs(args):
         "resize_func": None,
         "fps": args.camera_fps,
     }
+    camera_ids = [args.left_camera_id, args.wrist_camera_id]
+    if args.right_camera_id:
+        camera_ids.append(args.right_camera_id)
     camera_kwargs = {
         "camera_backend": camera_backend,
-        "camera_ids": [args.left_camera_id, args.right_camera_id, args.wrist_camera_id],
+        "camera_ids": camera_ids,
         "default": default_kwargs,
     }
     if args.left_camera_device:
@@ -283,11 +296,12 @@ class CameraOnlyObservationSource:
 def extract_observation(args, obs_dict, save_to_disk=False):
     image_observations = obs_dict["image"]
     left_image = find_camera_image(image_observations, args.left_camera_id)
-    right_image = find_camera_image(image_observations, args.right_camera_id)
+    right_image = find_camera_image(image_observations, args.right_camera_id) if args.right_camera_id else None
     wrist_image = find_camera_image(image_observations, args.wrist_camera_id)
 
     left_image = normalize_image(left_image, bgr_to_rgb=not args.no_bgr_to_rgb)
-    right_image = normalize_image(right_image, bgr_to_rgb=not args.no_bgr_to_rgb)
+    if right_image is not None:
+        right_image = normalize_image(right_image, bgr_to_rgb=not args.no_bgr_to_rgb)
     wrist_image = normalize_image(wrist_image, bgr_to_rgb=not args.no_bgr_to_rgb)
 
     robot_state = obs_dict["robot_state"]
@@ -301,13 +315,14 @@ def extract_observation(args, obs_dict, save_to_disk=False):
     }
 
     if save_to_disk and args.save_preview:
-        combined_image = np.concatenate([left_image, wrist_image, right_image], axis=1)
-        Image.fromarray(combined_image).save(args.save_preview)
+        save_preview_image(args.save_preview, [left_image, wrist_image, right_image])
 
     return curr_obs
 
 
 def find_camera_image(image_observations, camera_id):
+    if not camera_id:
+        raise ValueError("camera_id must be non-empty")
     for key, value in image_observations.items():
         if camera_id in key and "left" in key:
             return value
@@ -330,11 +345,32 @@ def normalize_image(image, bgr_to_rgb=True):
     return np.ascontiguousarray(image)
 
 
+def save_preview_image(path, images):
+    images = [np.asarray(image) for image in images if image is not None]
+    if not images:
+        return
+
+    preview_height = min(image.shape[0] for image in images)
+    preview_tiles = []
+    for image in images:
+        height, width = image.shape[:2]
+        if height != preview_height:
+            preview_width = max(1, int(round(width * (preview_height / height))))
+            image = np.asarray(Image.fromarray(image).resize((preview_width, preview_height)))
+        preview_tiles.append(image)
+
+    Image.fromarray(np.concatenate(preview_tiles, axis=1)).save(path)
+
+
 def validate_action_chunk(pred_action_chunk):
-    if pred_action_chunk.shape != EXPECTED_ACTION_CHUNK_SHAPE:
+    if (
+        pred_action_chunk.ndim != 2
+        or pred_action_chunk.shape[0] < 1
+        or pred_action_chunk.shape[1] != EXPECTED_ACTION_DIM
+    ):
         raise ValueError(
-            "Expected action chunk shape {0}, got {1}".format(
-                EXPECTED_ACTION_CHUNK_SHAPE, pred_action_chunk.shape
+            "Expected action chunk shape (N, {0}) with N >= 1, got {1}".format(
+                EXPECTED_ACTION_DIM, pred_action_chunk.shape
             )
         )
 
