@@ -62,6 +62,7 @@ class ArducamCamera:
         backend=None,
         fps=None,
         fourcc=None,
+        warmup_frames=None,
     ):
         self.image = image
         self.depth = depth
@@ -75,6 +76,7 @@ class ArducamCamera:
         self.backend = backend
         self.fps = fps
         self.fourcc = fourcc
+        self.warmup_frames = warmup_frames
 
     def set_calibration_mode(self):
         self.set_trajectory_mode()
@@ -105,6 +107,7 @@ class ArducamCamera:
             )
 
         self._apply_capture_settings()
+        self._warmup_capture()
         self.current_mode = "trajectory"
 
     def _resolve_device(self):
@@ -139,6 +142,15 @@ class ArducamCamera:
         if self.fourcc is not None:
             fourcc = cv2.VideoWriter_fourcc(*self.fourcc)
             self._cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+
+    def _warmup_capture(self):
+        warmup_frames = self.warmup_frames
+        if warmup_frames is None:
+            warmup_frames = int(os.environ.get(_env_name(self.serial_number, "WARMUP_FRAMES"), "12"))
+        for _ in range(max(0, warmup_frames)):
+            ok, _frame = self._cap.read()
+            if not ok:
+                break
 
     def get_intrinsics(self):
         return deepcopy(self._intrinsics)
