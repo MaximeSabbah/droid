@@ -46,9 +46,31 @@ class FrankaRobot:
             self._max_gripper_width = float(os.environ.get("DROID_FRANKA_HAND_MAX_WIDTH", "0.08"))
         else:
             self._gripper = GripperInterface(ip_address="localhost")
-            self._max_gripper_width = self._gripper.metadata.max_width
+            self._max_gripper_width = self._resolve_gripper_max_width()
         self._ik_solver = RobotIKSolver()
         self._controller_not_loaded = False
+
+    def _resolve_gripper_max_width(self):
+        fallback_width = float(os.environ.get("DROID_FRANKA_HAND_MAX_WIDTH", "0.08"))
+
+        metadata = getattr(self._gripper, "metadata", None)
+        metadata_width = float(getattr(metadata, "max_width", 0.0) or 0.0)
+        if metadata_width > 0:
+            return metadata_width
+
+        try:
+            state_width = float(getattr(self._gripper.get_state(), "max_width", 0.0) or 0.0)
+            if state_width > 0:
+                return state_width
+        except grpc.RpcError as exc:
+            print("Could not read gripper max_width from state: {0}".format(exc))
+
+        print(
+            "Gripper metadata max_width unavailable; using DROID_FRANKA_HAND_MAX_WIDTH={0}".format(
+                fallback_width
+            )
+        )
+        return fallback_width
 
     def kill_controller(self):
         if getattr(self, "_robot_process", None) is not None:

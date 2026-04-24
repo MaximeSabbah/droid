@@ -1,5 +1,6 @@
 from copy import deepcopy
 import os
+import time
 
 import cv2
 import numpy as np
@@ -94,8 +95,30 @@ class RealSenseColorCamera:
             config.enable_device(device_serial)
         config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
 
-        self._pipeline = rs.pipeline()
-        self._profile = self._pipeline.start(config)
+        retries = int(os.environ.get("DROID_D435_OPEN_RETRIES", "3"))
+        retry_delay_s = float(os.environ.get("DROID_D435_OPEN_RETRY_DELAY_S", "0.5"))
+        last_exc = None
+        for attempt in range(max(1, retries)):
+            self._pipeline = rs.pipeline()
+            try:
+                self._profile = self._pipeline.start(config)
+                break
+            except RuntimeError as exc:
+                last_exc = exc
+                self.disable_camera()
+                if attempt + 1 < retries:
+                    time.sleep(retry_delay_s)
+                    continue
+                raise RuntimeError(
+                    "Failed to start {0} color stream at {1}x{2}@{3}. "
+                    "If this says the device is busy, make sure the external camera path "
+                    "does not point at a RealSense /dev/video node; prefer /dev/v4l/by-id symlinks.".format(
+                        self.serial_number,
+                        width,
+                        height,
+                        fps,
+                    )
+                ) from last_exc
         self._save_intrinsics(rs)
         self.current_mode = "trajectory"
 
@@ -140,7 +163,10 @@ class RealSenseColorCamera:
 
     def disable_camera(self):
         if self._pipeline is not None:
-            self._pipeline.stop()
+            try:
+                self._pipeline.stop()
+            except RuntimeError:
+                pass
             self._pipeline = None
             self._profile = None
         self.current_mode = "disabled"

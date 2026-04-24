@@ -37,30 +37,36 @@ class RobotEnv(gym.Env):
         self.randomize_high = np.array([0.1, 0.2, 0.1, 0.3, 0.3, 0.3])
         self.DoF = 7 if ("cartesian" in action_space) else 8
         self.control_hz = 15
+        self._robot = None
+        self.camera_reader = None
 
-        self.robot_backend = self._resolve_robot_backend(robot_backend)
-        if self.robot_backend == "local":
-            from droid.franka.robot import FrankaRobot
+        try:
+            self.robot_backend = self._resolve_robot_backend(robot_backend)
+            if self.robot_backend == "local":
+                from droid.franka.robot import FrankaRobot
 
-            self._robot = FrankaRobot()
-            if launch_robot:
-                self._robot.launch_controller()
-            self._robot.launch_robot()
-        elif self.robot_backend == "server":
-            if nuc_ip is None:
-                raise ValueError("RobotEnv robot_backend='server' requires DROID_NUC_IP to be set")
-            self._robot = ServerInterface(ip_address=nuc_ip, launch=launch_robot)
-        else:
-            raise ValueError("Unsupported RobotEnv robot_backend: {0}".format(self.robot_backend))
+                self._robot = FrankaRobot()
+                if launch_robot:
+                    self._robot.launch_controller()
+                self._robot.launch_robot()
+            elif self.robot_backend == "server":
+                if nuc_ip is None:
+                    raise ValueError("RobotEnv robot_backend='server' requires DROID_NUC_IP to be set")
+                self._robot = ServerInterface(ip_address=nuc_ip, launch=launch_robot)
+            else:
+                raise ValueError("Unsupported RobotEnv robot_backend: {0}".format(self.robot_backend))
 
-        # Create Cameras
-        self.camera_reader = MultiCameraWrapper(camera_kwargs or {})
-        self.calibration_dict = load_calibration_info()
-        self.camera_type_dict = camera_type_dict
+            # Create Cameras
+            self.camera_reader = MultiCameraWrapper(camera_kwargs or {})
+            self.calibration_dict = load_calibration_info()
+            self.camera_type_dict = camera_type_dict
 
-        # Reset Robot
-        if do_reset:
-            self.reset()
+            # Reset Robot
+            if do_reset:
+                self.reset()
+        except Exception:
+            self.close()
+            raise
 
     def _resolve_robot_backend(self, robot_backend):
         if robot_backend is None:
@@ -159,3 +165,9 @@ class RobotEnv(gym.Env):
         obs_dict["camera_intrinsics"] = intrinsics
 
         return obs_dict
+
+    def close(self):
+        if self.camera_reader is not None:
+            self.camera_reader.disable_cameras()
+        if getattr(self, "robot_backend", None) == "local" and self._robot is not None:
+            self._robot.kill_controller()

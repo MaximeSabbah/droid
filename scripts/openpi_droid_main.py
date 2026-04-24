@@ -63,6 +63,29 @@ def parse_args():
     parser.add_argument("--log_csv", default=os.environ.get("DROID_ROLLOUT_LOG_CSV", ""))
     parser.add_argument("--log_dir", default=os.environ.get("DROID_ROLLOUT_LOG_DIR", ""))
     parser.add_argument(
+        "--arm_action_scale",
+        type=float,
+        default=float(os.environ.get("DROID_ARM_ACTION_SCALE", "1.0")),
+        help="Scale the first seven arm action dimensions before execution.",
+    )
+    parser.add_argument(
+        "--freeze_gripper",
+        action="store_true",
+        default=os.environ.get("DROID_FREEZE_GRIPPER", "0") == "1",
+        help="Hold the gripper at the observed position instead of executing policy gripper actions.",
+    )
+    parser.add_argument(
+        "--stop_on_gripper_close",
+        action="store_true",
+        default=os.environ.get("DROID_STOP_ON_GRIPPER_CLOSE", "0") == "1",
+        help="Abort before execution if a policy action asks to close the gripper.",
+    )
+    parser.add_argument(
+        "--gripper_close_threshold",
+        type=float,
+        default=float(os.environ.get("DROID_GRIPPER_CLOSE_THRESHOLD", "0.5")),
+    )
+    parser.add_argument(
         "--warmup_observations",
         type=int,
         default=int(os.environ.get("DROID_OBSERVATION_WARMUP_STEPS", "0")),
@@ -117,7 +140,24 @@ def main():
 
             chunk_index = actions_from_chunk_completed
             raw_action = pred_action_chunk[chunk_index]
-            action = process_action(raw_action)
+            if (
+                args.stop_on_gripper_close
+                and not args.freeze_gripper
+                and raw_action[-1].item() > args.gripper_close_threshold
+            ):
+                raise RuntimeError(
+                    "Stopping before gripper close command at step {0}: raw gripper={1:.3f} > threshold={2:.3f}".format(
+                        t_step,
+                        raw_action[-1].item(),
+                        args.gripper_close_threshold,
+                    )
+                )
+            gripper_override = curr_obs["gripper_position"][0] if args.freeze_gripper else None
+            action = process_action(
+                raw_action,
+                arm_action_scale=args.arm_action_scale,
+                gripper_override=gripper_override,
+            )
             actions_from_chunk_completed += 1
 
             action_info = None
@@ -321,7 +361,7 @@ class RobotEnvObservationSource:
         return self.env.step(action)
 
     def close(self):
-        self.env.camera_reader.disable_cameras()
+        self.env.close()
 
 
 class CameraOnlyObservationSource:
@@ -432,9 +472,12 @@ def validate_action_chunk(pred_action_chunk):
         )
 
 
-def process_action(action):
-    action = np.asarray(action)
-    if action[-1].item() > 0.5:
+def process_action(action, arm_action_scale=1.0, gripper_override=None):
+    action = np.asarray(action, dtype=float).copy()
+    action[:-1] *= arm_action_scale
+    if gripper_override is not None:
+        action = np.concatenate([action[:-1], np.asarray([float(gripper_override)])])
+    elif action[-1].item() > 0.5:
         action = np.concatenate([action[:-1], np.ones((1,))])
     else:
         action = np.concatenate([action[:-1], np.zeros((1,))])

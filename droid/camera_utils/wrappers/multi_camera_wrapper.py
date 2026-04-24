@@ -10,6 +10,7 @@ class MultiCameraWrapper:
     custom_camera_ids = {"arducam_left", "arducam_right", "d435_color"}
 
     def __init__(self, camera_kwargs=None):
+        self.camera_dict = {}
         camera_kwargs = dict(camera_kwargs or {})
         camera_backend = camera_kwargs.pop("camera_backend", os.environ.get("DROID_CAMERA_BACKEND", "auto"))
         camera_backend = (camera_backend or "auto").lower()
@@ -20,17 +21,21 @@ class MultiCameraWrapper:
             requested_camera_ids = [requested_camera_ids]
         requested_camera_ids = [cam_id for cam_id in requested_camera_ids if cam_id]
 
-        # Open Cameras #
-        cameras = self._gather_cameras(camera_backend, requested_camera_ids)
-        self.camera_dict = {cam.serial_number: cam for cam in cameras}
+        try:
+            # Open Cameras #
+            cameras = self._gather_cameras(camera_backend, requested_camera_ids)
+            self.camera_dict = {cam.serial_number: cam for cam in cameras}
 
-        # Set Correct Parameters #
-        for cam_id in self.camera_dict.keys():
-            curr_cam_kwargs = self._get_camera_kwargs(cam_id, camera_kwargs)
-            self.camera_dict[cam_id].set_reading_parameters(**curr_cam_kwargs)
+            # Set Correct Parameters #
+            for cam_id in self.camera_dict.keys():
+                curr_cam_kwargs = self._get_camera_kwargs(cam_id, camera_kwargs)
+                self.camera_dict[cam_id].set_reading_parameters(**curr_cam_kwargs)
 
-        # Launch Camera #
-        self.set_trajectory_mode()
+            # Launch Camera #
+            self.set_trajectory_mode()
+        except Exception:
+            self.disable_cameras()
+            raise
 
     def _gather_cameras(self, camera_backend, requested_camera_ids):
         if camera_backend == "auto":
@@ -115,8 +120,12 @@ class MultiCameraWrapper:
                 cam.disable_camera()
 
         # Put All Cameras In Trajectory Mode #
-        for cam in self.camera_dict.values():
-            cam.set_trajectory_mode()
+        try:
+            for cam in self.camera_dict.values():
+                cam.set_trajectory_mode()
+        except Exception:
+            self.disable_cameras()
+            raise
 
     ### Data Storing Functions ###
     def start_recording(self, recording_folderpath):
@@ -153,4 +162,7 @@ class MultiCameraWrapper:
 
     def disable_cameras(self):
         for camera in self.camera_dict.values():
-            camera.disable_camera()
+            try:
+                camera.disable_camera()
+            except Exception:
+                pass

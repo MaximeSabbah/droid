@@ -97,6 +97,7 @@ class ArducamCamera:
         api_preference = self._resolve_backend()
         self._cap = cv2.VideoCapture(device, api_preference)
         if not self._cap.isOpened():
+            self.disable_camera()
             raise RuntimeError(
                 "Failed to open {0} at device {1!r}. Override with {2} or {3}.".format(
                     self.serial_number,
@@ -106,9 +107,13 @@ class ArducamCamera:
                 )
             )
 
-        self._apply_capture_settings()
-        self._warmup_capture()
-        self.current_mode = "trajectory"
+        try:
+            self._apply_capture_settings()
+            self._warmup_capture()
+            self.current_mode = "trajectory"
+        except Exception:
+            self.disable_camera()
+            raise
 
     def _resolve_device(self):
         if self.device is not None:
