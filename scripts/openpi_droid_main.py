@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument("--open_loop_horizon", type=int, default=8)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     parser.add_argument("--execute", dest="dry_run", action="store_false")
+    parser.add_argument("--simulation", action="store_true")
     parser.add_argument("--mock_robot_state", action="store_true")
     parser.add_argument("--no_launch_robot", action="store_true")
     parser.add_argument("--no_reset", action="store_true")
@@ -65,12 +66,12 @@ def main():
     args = parse_args()
     if not args.dry_run and args.mock_robot_state:
         raise ValueError("--mock_robot_state cannot be used with --execute")
-    if not args.dry_run and (args.mock_policy or args.mock_policy_bad_shape or args.mock_cameras):
+    if not args.dry_run and not args.simulation and (args.mock_policy or args.mock_policy_bad_shape or args.mock_cameras):
         raise ValueError("Mock policy/camera options are dry-run only")
     if args.external_camera == "right" and not args.right_camera_id:
         raise ValueError("--external_camera=right requires --right_camera_id")
     if not args.dry_run:
-        require_motion_guards()
+        require_motion_guards(args)
 
     policy_client = make_policy_client(args)
     observation_source = make_observation_source(args)
@@ -113,7 +114,25 @@ def main():
         observation_source.close()
 
 
-def require_motion_guards():
+def require_motion_guards(args):
+    if args.simulation:
+        if not args.no_launch_robot:
+            raise RuntimeError(
+                "Simulation execution requires --no_launch_robot and a separately launched Polymetis sim server."
+            )
+        required = {
+            "DROID_ENABLE_SIM_MOTION": "1",
+            "DROID_CONFIRM_SIMULATION": "1",
+        }
+        missing = [name for name, value in required.items() if os.environ.get(name) != value]
+        if missing:
+            raise RuntimeError(
+                "Refusing to execute simulation motion. Set these environment variables first: {0}".format(
+                    ", ".join("{0}=1".format(name) for name in missing)
+                )
+            )
+        return
+
     required = {
         "DROID_ENABLE_ROBOT_MOTION": "1",
         "CONFIRM_REAL_ROBOT": "1",

@@ -45,7 +45,7 @@ class RobotEnv(gym.Env):
             self._robot = FrankaRobot()
             if launch_robot:
                 self._robot.launch_controller()
-                self._robot.launch_robot()
+            self._robot.launch_robot()
         elif self.robot_backend == "server":
             if nuc_ip is None:
                 raise ValueError("RobotEnv robot_backend='server' requires DROID_NUC_IP to be set")
