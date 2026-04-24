@@ -46,6 +46,10 @@ if [[ -z "${DROID_ROBOT_LAUNCH_CMD:-}" ]]; then
     fi
 fi
 
+if [[ "${DROID_ROBOT_READONLY:-0}" == "1" ]]; then
+    DROID_ROBOT_LAUNCH_CMD="${DROID_ROBOT_LAUNCH_CMD} robot_client.executable_cfg.readonly=true"
+fi
+
 echo "Launching robot with: $DROID_ROBOT_LAUNCH_CMD"
 
 if [[ "${DROID_ROBOT_DRY_RUN:-0}" == "1" ]]; then

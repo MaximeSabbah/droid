@@ -1,4 +1,5 @@
 import argparse
+import csv
 import contextlib
 import os
 import signal
@@ -59,6 +60,13 @@ def parse_args():
     parser.add_argument("--no_reset", action="store_true")
     parser.add_argument("--save_preview", default="robot_camera_views.png")
     parser.add_argument("--no_bgr_to_rgb", action="store_true")
+    parser.add_argument("--log_csv", default=os.environ.get("DROID_ROLLOUT_LOG_CSV", ""))
+    parser.add_argument("--log_dir", default=os.environ.get("DROID_ROLLOUT_LOG_DIR", ""))
+    parser.add_argument(
+        "--warmup_observations",
+        type=int,
+        default=int(os.environ.get("DROID_OBSERVATION_WARMUP_STEPS", "0")),
+    )
     return parser.parse_args()
 
 
@@ -73,12 +81,18 @@ def main():
     if not args.dry_run:
         require_motion_guards(args)
 
+    instruction = args.prompt or input("Enter instruction: ")
+    if args.log_dir and not args.log_csv:
+        args.log_csv = os.path.join(args.log_dir, "rollout.csv")
+
     policy_client = make_policy_client(args)
     observation_source = make_observation_source(args)
-    instruction = args.prompt or input("Enter instruction: ")
+    debug_logger = RolloutDebugLogger(args.log_dir, args, instruction)
+    warmup_observation_source(observation_source, args.warmup_observations)
 
     actions_from_chunk_completed = 0
     pred_action_chunk = None
+    rollout_logger = RolloutCsvLogger(args.log_csv)
 
     try:
         for t_step in range(args.max_timesteps):
@@ -86,32 +100,56 @@ def main():
             obs_dict = observation_source.get_observation()
             curr_obs = extract_observation(args, obs_dict, save_to_disk=(t_step == 0))
 
+            policy_refreshed = False
             if (
                 pred_action_chunk is None
                 or actions_from_chunk_completed >= args.open_loop_horizon
                 or actions_from_chunk_completed >= pred_action_chunk.shape[0]
             ):
                 actions_from_chunk_completed = 0
+                policy_refreshed = True
                 request_data = make_policy_request(curr_obs, args.external_camera, instruction)
                 validate_policy_request(request_data)
                 with prevent_keyboard_interrupt():
                     pred_action_chunk = np.asarray(policy_client.infer(request_data)["actions"])
                 validate_action_chunk(pred_action_chunk)
+                debug_logger.write_policy_refresh(t_step, request_data, pred_action_chunk)
 
-            action = process_action(pred_action_chunk[actions_from_chunk_completed])
+            chunk_index = actions_from_chunk_completed
+            raw_action = pred_action_chunk[chunk_index]
+            action = process_action(raw_action)
             actions_from_chunk_completed += 1
 
+            action_info = None
             if args.dry_run:
                 print_dry_run_step(t_step, action, pred_action_chunk, curr_obs)
             else:
-                observation_source.step(action)
+                action_info = observation_source.step(action)
 
             elapsed_time = time.time() - start_time
+            rollout_logger.write_step(
+                t_step,
+                chunk_index,
+                policy_refreshed,
+                raw_action,
+                action,
+                pred_action_chunk,
+                curr_obs,
+                action_info,
+                elapsed_time,
+            )
             sleep_time = (1 / DROID_CONTROL_FREQUENCY) - elapsed_time
             if sleep_time > 0:
                 time.sleep(sleep_time)
     finally:
+        rollout_logger.close()
+        debug_logger.close()
         observation_source.close()
+
+
+def warmup_observation_source(observation_source, warmup_steps):
+    for _ in range(max(0, warmup_steps)):
+        observation_source.get_observation()
 
 
 def require_motion_guards(args):
@@ -401,6 +439,159 @@ def process_action(action):
     else:
         action = np.concatenate([action[:-1], np.zeros((1,))])
     return np.clip(action, -1, 1)
+
+
+class RolloutDebugLogger:
+    def __init__(self, log_dir, args, instruction):
+        self.log_dir = log_dir
+        if not log_dir:
+            return
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(os.path.join(log_dir, "policy_inputs"), exist_ok=True)
+        os.makedirs(os.path.join(log_dir, "action_chunks"), exist_ok=True)
+        self.write_manifest(args, instruction)
+
+    def write_manifest(self, args, instruction):
+        path = os.path.join(self.log_dir, "manifest.txt")
+        with open(path, "w") as f:
+            f.write("OpenPI DROID rollout debug log\n")
+            f.write("prompt={0}\n".format(instruction))
+            f.write("control_hz={0}\n".format(DROID_CONTROL_FREQUENCY))
+            f.write("action_space=joint_velocity\n")
+            f.write("gripper_action_space=position\n")
+            f.write("expected_action_dim={0}\n".format(EXPECTED_ACTION_DIM))
+            f.write("\nargs:\n")
+            for name, value in sorted(vars(args).items()):
+                f.write("{0}={1}\n".format(name, value))
+
+    def write_policy_refresh(self, step_idx, request_data, pred_action_chunk):
+        if not self.log_dir:
+            return
+        prefix = "step_{0:04d}".format(step_idx)
+        external_path = os.path.join(self.log_dir, "policy_inputs", prefix + "_external.png")
+        wrist_path = os.path.join(self.log_dir, "policy_inputs", prefix + "_wrist.png")
+        Image.fromarray(np.asarray(request_data["observation/exterior_image_1_left"], dtype=np.uint8)).save(
+            external_path
+        )
+        Image.fromarray(np.asarray(request_data["observation/wrist_image_left"], dtype=np.uint8)).save(
+            wrist_path
+        )
+        chunk_path = os.path.join(self.log_dir, "action_chunks", prefix + "_raw_actions.csv")
+        self.write_action_chunk(chunk_path, pred_action_chunk)
+        metadata_path = os.path.join(self.log_dir, "policy_inputs", prefix + "_metadata.txt")
+        with open(metadata_path, "w") as f:
+            f.write("prompt={0}\n".format(request_data["prompt"]))
+            f.write("joint_position={0}\n".format(np.asarray(request_data["observation/joint_position"]).tolist()))
+            f.write("gripper_position={0}\n".format(np.asarray(request_data["observation/gripper_position"]).tolist()))
+            f.write("action_chunk_shape={0}\n".format(tuple(pred_action_chunk.shape)))
+            f.write("raw_action_min={0}\n".format(float(np.min(pred_action_chunk))))
+            f.write("raw_action_max={0}\n".format(float(np.max(pred_action_chunk))))
+
+    @staticmethod
+    def write_action_chunk(path, pred_action_chunk):
+        fieldnames = ["chunk_index"] + ["raw_{0}".format(i) for i in range(EXPECTED_ACTION_DIM)]
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for idx, action in enumerate(np.asarray(pred_action_chunk).tolist()):
+                row = {"chunk_index": idx}
+                for action_idx, value in enumerate(action):
+                    row["raw_{0}".format(action_idx)] = float(value)
+                writer.writerow(row)
+
+    def close(self):
+        pass
+
+
+class RolloutCsvLogger:
+    def __init__(self, path):
+        self.path = path
+        self.file = None
+        self.writer = None
+        if not path:
+            return
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self.file = open(path, "w", newline="")
+        self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames())
+        self.writer.writeheader()
+
+    @staticmethod
+    def fieldnames():
+        fields = [
+            "step",
+            "chunk_index",
+            "policy_refreshed",
+            "chunk_rows",
+            "chunk_cols",
+            "elapsed_s",
+            "raw_min",
+            "raw_max",
+            "processed_min",
+            "processed_max",
+            "obs_gripper",
+            "target_gripper",
+        ]
+        fields += ["raw_{0}".format(i) for i in range(EXPECTED_ACTION_DIM)]
+        fields += ["processed_{0}".format(i) for i in range(EXPECTED_ACTION_DIM)]
+        fields += ["obs_joint_{0}".format(i) for i in range(7)]
+        fields += ["obs_cartesian_{0}".format(i) for i in range(6)]
+        fields += ["target_joint_velocity_{0}".format(i) for i in range(7)]
+        fields += ["target_joint_position_{0}".format(i) for i in range(7)]
+        return fields
+
+    def write_step(
+        self,
+        t_step,
+        chunk_index,
+        policy_refreshed,
+        raw_action,
+        processed_action,
+        pred_action_chunk,
+        curr_obs,
+        action_info,
+        elapsed_time,
+    ):
+        if self.writer is None:
+            return
+        raw_action = np.asarray(raw_action)
+        processed_action = np.asarray(processed_action)
+        row = {
+            "step": t_step,
+            "chunk_index": chunk_index,
+            "policy_refreshed": policy_refreshed,
+            "chunk_rows": pred_action_chunk.shape[0],
+            "chunk_cols": pred_action_chunk.shape[1],
+            "elapsed_s": elapsed_time,
+            "raw_min": float(raw_action.min()),
+            "raw_max": float(raw_action.max()),
+            "processed_min": float(processed_action.min()),
+            "processed_max": float(processed_action.max()),
+            "obs_gripper": float(np.asarray(curr_obs["gripper_position"])[0]),
+            "target_gripper": "",
+        }
+        for idx, value in enumerate(raw_action.tolist()):
+            row["raw_{0}".format(idx)] = float(value)
+        for idx, value in enumerate(processed_action.tolist()):
+            row["processed_{0}".format(idx)] = float(value)
+        for idx, value in enumerate(np.asarray(curr_obs["joint_position"]).tolist()):
+            row["obs_joint_{0}".format(idx)] = float(value)
+        for idx, value in enumerate(np.asarray(curr_obs["cartesian_position"]).tolist()):
+            row["obs_cartesian_{0}".format(idx)] = float(value)
+        if action_info:
+            for idx, value in enumerate(action_info.get("joint_velocity", [])):
+                row["target_joint_velocity_{0}".format(idx)] = float(value)
+            for idx, value in enumerate(action_info.get("joint_position", [])):
+                row["target_joint_position_{0}".format(idx)] = float(value)
+            if "gripper_position" in action_info:
+                row["target_gripper"] = float(action_info["gripper_position"])
+        self.writer.writerow(row)
+        self.file.flush()
+
+    def close(self):
+        if self.file is not None:
+            self.file.close()
 
 
 def print_dry_run_step(t_step, action, pred_action_chunk, curr_obs):

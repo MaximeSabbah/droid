@@ -24,7 +24,10 @@ class FrankaRobot:
 
         dir_path = os.path.dirname(os.path.realpath(__file__))
         self._robot_process = run_terminal_command(self._build_launch_command(dir_path, "launch_robot.sh"))
-        self._gripper_process = run_terminal_command(self._build_launch_command(dir_path, "launch_gripper.sh"))
+        if os.environ.get("DROID_SKIP_GRIPPER_LAUNCH", "0") == "1":
+            self._gripper_process = None
+        else:
+            self._gripper_process = run_terminal_command(self._build_launch_command(dir_path, "launch_gripper.sh"))
         self._server_launched = True
         time.sleep(5)
 
@@ -36,17 +39,26 @@ class FrankaRobot:
         return "bash " + script_path
 
     def launch_robot(self):
+        self._skip_gripper = os.environ.get("DROID_SKIP_GRIPPER_LAUNCH", "0") == "1"
         self._robot = RobotInterface(ip_address="localhost")
-        self._gripper = GripperInterface(ip_address="localhost")
-        self._max_gripper_width = self._gripper.metadata.max_width
+        if self._skip_gripper:
+            self._gripper = None
+            self._max_gripper_width = float(os.environ.get("DROID_FRANKA_HAND_MAX_WIDTH", "0.08"))
+        else:
+            self._gripper = GripperInterface(ip_address="localhost")
+            self._max_gripper_width = self._gripper.metadata.max_width
         self._ik_solver = RobotIKSolver()
         self._controller_not_loaded = False
 
     def kill_controller(self):
-        self._robot_process.kill()
-        self._gripper_process.kill()
+        if getattr(self, "_robot_process", None) is not None:
+            self._robot_process.kill()
+        if getattr(self, "_gripper_process", None) is not None:
+            self._gripper_process.kill()
 
     def update_command(self, command, action_space="cartesian_velocity", gripper_action_space=None, blocking=False):
+        if getattr(self, "_skip_gripper", False):
+            raise RuntimeError("Cannot command FrankaRobot while DROID_SKIP_GRIPPER_LAUNCH=1")
         action_dict = self.create_action_dict(command, action_space=action_space, gripper_action_space=gripper_action_space)
 
         self.update_joints(action_dict["joint_position"], velocity=False, blocking=blocking)
@@ -151,6 +163,8 @@ class FrankaRobot:
         return self._robot.get_joint_velocities().tolist()
 
     def get_gripper_position(self):
+        if getattr(self, "_skip_gripper", False):
+            return float(os.environ.get("DROID_MOCK_GRIPPER_POSITION", "0.0"))
         return 1 - (self._gripper.get_state().width / self._max_gripper_width)
 
     def get_ee_pose(self):
