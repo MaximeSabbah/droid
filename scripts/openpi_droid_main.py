@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument("--left_camera_id", default=os.environ.get("DROID_VARIED_CAMERA_1_ID", "arducam_left"))
     parser.add_argument("--right_camera_id", default=os.environ.get("DROID_VARIED_CAMERA_2_ID", ""))
     parser.add_argument("--wrist_camera_id", default=os.environ.get("DROID_HAND_CAMERA_ID", "d435_color"))
-    parser.add_argument("--external_camera", choices=["left", "right"], default="left")
+    parser.add_argument("--external_camera", choices=["left", "right", "alternate"], default="left")
     parser.add_argument("--camera_backend", default=os.environ.get("DROID_CAMERA_BACKEND", "openpi"))
     parser.add_argument("--left_camera_device", default=os.environ.get("DROID_ARDUCAM_LEFT_DEVICE"))
     parser.add_argument("--right_camera_device", default=os.environ.get("DROID_ARDUCAM_RIGHT_DEVICE"))
@@ -99,8 +99,7 @@ def main():
         raise ValueError("--mock_robot_state cannot be used with --execute")
     if not args.dry_run and not args.simulation and (args.mock_policy or args.mock_policy_bad_shape or args.mock_cameras):
         raise ValueError("Mock policy/camera options are dry-run only")
-    if args.external_camera == "right" and not args.right_camera_id:
-        raise ValueError("--external_camera=right requires --right_camera_id")
+    validate_external_camera_args(args)
     if not args.dry_run:
         require_motion_guards(args)
 
@@ -115,6 +114,8 @@ def main():
 
     actions_from_chunk_completed = 0
     pred_action_chunk = None
+    policy_refresh_count = 0
+    selected_external_camera = args.external_camera
     rollout_logger = RolloutCsvLogger(args.log_csv)
 
     try:
@@ -131,12 +132,19 @@ def main():
             ):
                 actions_from_chunk_completed = 0
                 policy_refreshed = True
-                request_data = make_policy_request(curr_obs, args.external_camera, instruction)
+                selected_external_camera = select_external_camera(args, policy_refresh_count)
+                request_data = make_policy_request(curr_obs, selected_external_camera, instruction)
                 validate_policy_request(request_data)
                 with prevent_keyboard_interrupt():
                     pred_action_chunk = np.asarray(policy_client.infer(request_data)["actions"])
                 validate_action_chunk(pred_action_chunk)
-                debug_logger.write_policy_refresh(t_step, request_data, pred_action_chunk)
+                debug_logger.write_policy_refresh(
+                    t_step,
+                    request_data,
+                    pred_action_chunk,
+                    selected_external_camera,
+                )
+                policy_refresh_count += 1
 
             chunk_index = actions_from_chunk_completed
             raw_action = pred_action_chunk[chunk_index]
@@ -171,6 +179,7 @@ def main():
                 t_step,
                 chunk_index,
                 policy_refreshed,
+                selected_external_camera,
                 raw_action,
                 action,
                 pred_action_chunk,
@@ -185,6 +194,17 @@ def main():
         rollout_logger.close()
         debug_logger.close()
         observation_source.close()
+
+
+def validate_external_camera_args(args):
+    if args.external_camera in ("right", "alternate") and not args.right_camera_id:
+        raise ValueError("--external_camera={0} requires --right_camera_id".format(args.external_camera))
+
+
+def select_external_camera(args, policy_refresh_count):
+    if args.external_camera == "alternate":
+        return "left" if policy_refresh_count % 2 == 0 else "right"
+    return args.external_camera
 
 
 def warmup_observation_source(observation_source, warmup_steps):
@@ -519,7 +539,7 @@ class RolloutDebugLogger:
             for name, value in sorted(vars(args).items()):
                 f.write("{0}={1}\n".format(name, value))
 
-    def write_policy_refresh(self, step_idx, request_data, pred_action_chunk):
+    def write_policy_refresh(self, step_idx, request_data, pred_action_chunk, selected_external_camera):
         if not self.log_dir:
             return
         prefix = "step_{0:04d}".format(step_idx)
@@ -540,6 +560,7 @@ class RolloutDebugLogger:
         self.write_action_chunk(chunk_path, pred_action_chunk)
         metadata_path = os.path.join(self.log_dir, "policy_inputs", prefix + "_metadata.txt")
         with open(metadata_path, "w") as f:
+            f.write("selected_external_camera={0}\n".format(selected_external_camera))
             f.write("prompt={0}\n".format(request_data["prompt"]))
             f.write("joint_position={0}\n".format(np.asarray(request_data["observation/joint_position"]).tolist()))
             f.write("gripper_position={0}\n".format(np.asarray(request_data["observation/gripper_position"]).tolist()))
@@ -583,6 +604,7 @@ class RolloutCsvLogger:
             "step",
             "chunk_index",
             "policy_refreshed",
+            "selected_external_camera",
             "chunk_rows",
             "chunk_cols",
             "elapsed_s",
@@ -606,6 +628,7 @@ class RolloutCsvLogger:
         t_step,
         chunk_index,
         policy_refreshed,
+        selected_external_camera,
         raw_action,
         processed_action,
         pred_action_chunk,
@@ -621,6 +644,7 @@ class RolloutCsvLogger:
             "step": t_step,
             "chunk_index": chunk_index,
             "policy_refreshed": policy_refreshed,
+            "selected_external_camera": selected_external_camera,
             "chunk_rows": pred_action_chunk.shape[0],
             "chunk_cols": pred_action_chunk.shape[1],
             "elapsed_s": elapsed_time,
