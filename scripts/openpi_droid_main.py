@@ -262,7 +262,8 @@ def make_policy_request(curr_obs, external_camera, instruction):
     if curr_obs.get(external_image_key) is None:
         raise ValueError("Requested external camera {0!r}, but no image is available".format(external_camera))
 
-    return {
+    other_external_image_key = "right_image" if external_camera == "left" else "left_image"
+    request_data = {
         "observation/exterior_image_1_left": image_tools.resize_with_pad(
             curr_obs[external_image_key], 224, 224
         ),
@@ -271,6 +272,11 @@ def make_policy_request(curr_obs, external_camera, instruction):
         "observation/gripper_position": curr_obs["gripper_position"],
         "prompt": instruction,
     }
+    if curr_obs.get(other_external_image_key) is not None:
+        request_data["observation/exterior_image_2_left"] = image_tools.resize_with_pad(
+            curr_obs[other_external_image_key], 224, 224
+        )
+    return request_data
 
 
 def validate_policy_request(request_data):
@@ -285,7 +291,13 @@ def validate_policy_request(request_data):
     if missing_keys:
         raise ValueError("Policy request is missing keys: {0}".format(missing_keys))
 
-    for image_key in ("observation/exterior_image_1_left", "observation/wrist_image_left"):
+    for image_key in (
+        "observation/exterior_image_1_left",
+        "observation/exterior_image_2_left",
+        "observation/wrist_image_left",
+    ):
+        if image_key not in request_data:
+            continue
         image = np.asarray(request_data[image_key])
         if image.shape != (224, 224, 3):
             raise ValueError("{0} must have shape (224, 224, 3), got {1}".format(image_key, image.shape))
@@ -512,10 +524,15 @@ class RolloutDebugLogger:
             return
         prefix = "step_{0:04d}".format(step_idx)
         external_path = os.path.join(self.log_dir, "policy_inputs", prefix + "_external.png")
+        external_2_path = os.path.join(self.log_dir, "policy_inputs", prefix + "_external_2.png")
         wrist_path = os.path.join(self.log_dir, "policy_inputs", prefix + "_wrist.png")
         Image.fromarray(np.asarray(request_data["observation/exterior_image_1_left"], dtype=np.uint8)).save(
             external_path
         )
+        if "observation/exterior_image_2_left" in request_data:
+            Image.fromarray(np.asarray(request_data["observation/exterior_image_2_left"], dtype=np.uint8)).save(
+                external_2_path
+            )
         Image.fromarray(np.asarray(request_data["observation/wrist_image_left"], dtype=np.uint8)).save(
             wrist_path
         )
